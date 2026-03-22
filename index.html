@@ -1010,44 +1010,41 @@ function showAutoToast(msg) {
 const SB_URL = 'https://zhyowaarkrippajlakij.supabase.co';
 const SB_KEY = 'sb_publishable_Hj5RVqFM_CrlRnBH3YfKLw_Jib5A9Vp';
 
+// 新版 publishable key 需要同时传 apikey 和 Authorization
+const SB_HEADERS = {
+  'apikey': SB_KEY,
+  'Authorization': `Bearer ${SB_KEY}`,
+  'Content-Type': 'application/json',
+};
+
+// 生成不重复 ID：时间戳 * 1000 + 随机数，确保整批内唯一
+let _idCounter = 0;
+function genId() {
+  return Date.now() * 1000 + (++_idCounter % 1000);
+}
+
 const sb = {
-  async query(sql) {
-    const res = await fetch(`${SB_URL}/rest/v1/rpc/run_sql`, {
-      method: 'POST',
-      headers: { 'apikey': SB_KEY, 'Authorization': `Bearer ${SB_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: sql })
-    });
-    return res.json();
-  },
   async select(filter = {}) {
     let url = `${SB_URL}/rest/v1/records?select=*&order=ts.desc`;
     if (filter.date_gte) url += `&date=gte.${filter.date_gte}`;
     if (filter.date_lte) url += `&date=lte.${filter.date_lte}`;
-    const res = await fetch(url, {
-      headers: { 'apikey': SB_KEY, 'Authorization': `Bearer ${SB_KEY}`, 'Prefer': 'return=representation' }
-    });
-    return res.ok ? res.json() : [];
+    const res = await fetch(url, { headers: SB_HEADERS });
+    if (!res.ok) { console.error('select error', res.status, await res.text()); return []; }
+    return res.json();
   },
-  async insert(records) {
+  async upsert(records) {
     const res = await fetch(`${SB_URL}/rest/v1/records`, {
       method: 'POST',
-      headers: { 'apikey': SB_KEY, 'Authorization': `Bearer ${SB_KEY}`, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      headers: { ...SB_HEADERS, 'Prefer': 'resolution=merge-duplicates,return=minimal' },
       body: JSON.stringify(records)
     });
+    if (!res.ok) { console.error('upsert error', res.status, await res.text()); }
     return res.ok;
   },
   async delete(id) {
     const res = await fetch(`${SB_URL}/rest/v1/records?id=eq.${id}`, {
       method: 'DELETE',
-      headers: { 'apikey': SB_KEY, 'Authorization': `Bearer ${SB_KEY}` }
-    });
-    return res.ok;
-  },
-  async upsert(records) {
-    const res = await fetch(`${SB_URL}/rest/v1/records`, {
-      method: 'POST',
-      headers: { 'apikey': SB_KEY, 'Authorization': `Bearer ${SB_KEY}`, 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates,return=minimal' },
-      body: JSON.stringify(records)
+      headers: SB_HEADERS
     });
     return res.ok;
   }
@@ -1073,8 +1070,6 @@ function invalidateCache(y, m) {
 }
 
 async function saveRecord(record) {
-  // 清理 id 为整数
-  record.id = Math.floor(record.id);
   const ok = await sb.upsert([record]);
   if (ok) invalidateCache(
     parseInt(record.date.slice(0,4)),
@@ -1093,8 +1088,8 @@ async function deleteRecordRemote(id) {
 
 async function getAllRecords() {
   try {
-    const res = await fetch(`${SB_URL}/rest/v1/records?select=*&order=ts.desc&limit=10000`, {
-      headers: { 'apikey': SB_KEY, 'Authorization': `Bearer ${SB_KEY}` }
+    const res = await fetch(`${SB_URL}/rest/v1/records?select=id,ts,amount,type&order=ts.desc&limit=10000`, {
+      headers: SB_HEADERS
     });
     return res.ok ? res.json() : [];
   } catch { return []; }
@@ -1139,7 +1134,7 @@ async function addRecord() {
 
   const now = new Date();
   const record = {
-    id: Math.floor(Date.now() + Math.random() * 1000),
+    id: genId(),
     type: currentType,
     amount: amount,
     cat: selectedCat,
@@ -1423,7 +1418,7 @@ function parseXLSXFile(file) {
         const isIncome = inOut.includes('收入') || inOut === '收';
 
         records.push({
-          id: Date.now() + Math.random(),
+          id: genId(),
           type: isIncome ? 'income' : 'expense',
           amount, date, time,
           cat: guessCat(noteRaw),
@@ -1526,7 +1521,7 @@ function parseAlipay(text) {
     const noteRaw = [name, desc].filter(s => s && s !== '/').join(' ').trim().slice(0, 30);
 
     records.push({
-      id: Date.now() + Math.random(),
+      id: genId(),
       type: isIncome ? 'income' : 'expense',
       amount, date, time,
       cat: guessCat(noteRaw),
@@ -1572,7 +1567,7 @@ function parseWechat(text) {
     const isIncome = typeStr.includes('收入') || typeStr === '收';
 
     records.push({
-      id: Date.now() + Math.random(),
+      id: genId(),
       type: isIncome ? 'income' : 'expense',
       amount, date, time,
       cat: guessCat(name),
@@ -1597,7 +1592,7 @@ function parseLedger(text) {
     const amount = parseFloat(amountStr);
     if (!amount) continue;
     records.push({
-      id: Date.now() + Math.random(),
+      id: genId(),
       type: typeLabel === '收入' ? 'income' : 'expense',
       amount, date: date.trim(), time: (time||'00:00').trim(),
       cat: CAT_MAP[catLabel] || 'other',
@@ -1665,30 +1660,31 @@ async function confirmImport() {
   const toImport = pendingImport.filter(r => !r.isDuplicate);
   if (!toImport.length) { showToast('没有新记录可导入'); return; }
 
-  // 清理 id 为整数
-  const clean = toImport.map(r => ({ ...r, id: Math.floor(r.id) }));
+  // 用 genId() 确保每条记录 ID 唯一
+  const clean = toImport.map(r => ({ ...r, id: genId() }));
 
   showToast(`导入中，共 ${clean.length} 条…`);
-  // 分批 upsert，每批 200 条
-  const BATCH = 200;
-  let ok = true;
+  // 分批 upsert，每批 50 条避免请求过大
+  const BATCH = 50;
+  let done = 0;
   for (let i = 0; i < clean.length; i += BATCH) {
     const batch = clean.slice(i, i + BATCH);
-    const res = await sb.upsert(batch);
-    if (!res) { ok = false; break; }
+    const ok = await sb.upsert(batch);
+    if (!ok) {
+      showToast(`❌ 第 ${i+1}-${i+batch.length} 条失败，已导入 ${done} 条`);
+      Object.keys(cache).forEach(k => delete cache[k]);
+      await refresh();
+      return;
+    }
+    done += batch.length;
+    showToast(`导入中… ${done}/${clean.length}`);
   }
 
-  // 清空缓存
   Object.keys(cache).forEach(k => delete cache[k]);
-
-  if (ok) {
-    showToast(`✅ 已导入 ${clean.length} 条记录`);
-    pendingImport = [];
-    document.getElementById('importPreview').style.display = 'none';
-    await refresh();
-  } else {
-    showToast('❌ 部分导入失败，请重试');
-  }
+  showToast(`✅ 成功导入 ${done} 条记录`);
+  pendingImport = [];
+  document.getElementById('importPreview').style.display = 'none';
+  await refresh();
 }
 
 async function clearMonth() {
