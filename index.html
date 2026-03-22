@@ -319,8 +319,8 @@
 
   .record-wrap {
     position: relative;
-    overflow: hidden;
     border-radius: 8px;
+    overflow: hidden;
   }
 
   .record-item {
@@ -330,14 +330,12 @@
     padding: 10px 8px;
     border-radius: 8px;
     transition: background 0.15s, transform 0.25s ease;
-    position: relative;
     background: var(--bg);
     z-index: 1;
-    touch-action: pan-y;
+    position: relative;
   }
 
   .record-item:hover { background: var(--surface2); }
-  .record-item.swiped { transform: translateX(-68px); background: var(--surface2); }
 
   .record-icon {
     width: 36px; height: 36px;
@@ -385,26 +383,36 @@
     margin-top: 2px;
   }
 
-  /* 删除按钮：固定在 wrap 右侧，左滑后露出，不遮挡内容 */
+  /* 删除按钮：PC hover 显示，移动端始终显示小图标 */
   .delete-btn {
-    position: absolute;
-    right: 0; top: 0; bottom: 0;
-    width: 60px;
-    background: var(--red);
+    background: none;
     border: none;
-    color: white;
-    font-size: 18px;
+    color: var(--text3);
     cursor: pointer;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 2px;
-    z-index: 0;
-    border-radius: 0 8px 8px 0;
+    font-size: 14px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    flex-shrink: 0;
+    opacity: 0;
+    transition: opacity 0.15s, color 0.15s, background 0.15s;
+    line-height: 1;
   }
 
-  .delete-btn span { font-size: 10px; font-family: inherit; }
+  .record-item:hover .delete-btn {
+    opacity: 1;
+  }
+
+  .delete-btn:hover {
+    color: var(--red);
+    background: rgba(232,99,74,0.12);
+  }
+
+  /* 移动端始终显示删除按钮 */
+  @media (max-width: 768px) {
+    .delete-btn {
+      opacity: 0.4;
+    }
+  }
 
   .empty-state {
     text-align: center;
@@ -1230,8 +1238,7 @@ function renderRecords(records) {
       ${items.map(r => {
         const cat = getCatInfo(r.cat);
         return `<div class="record-wrap">
-          <button class="delete-btn" onclick="deleteRecord(${r.id})">🗑<span>删除</span></button>
-          <div class="record-item" ontouchstart="swipeStart(event,this)" ontouchmove="swipeMove(event,this)" ontouchend="swipeEnd(event,this)">
+          <div class="record-item">
             <div class="record-icon" style="background:${cat.color}18">${cat.icon}</div>
             <div class="record-info">
               <div class="record-cat">${cat.label}</div>
@@ -1241,6 +1248,7 @@ function renderRecords(records) {
               <div class="record-amount ${r.type}">${r.type==='expense'?'-':'+'}¥${r.amount.toFixed(2)}</div>
               <div class="record-time">${r.time}</div>
             </div>
+            <button class="delete-btn" onclick="deleteRecord(${r.id})" title="删除">🗑</button>
           </div>
         </div>`;
       }).join('')}
