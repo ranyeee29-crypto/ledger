@@ -375,6 +375,7 @@
 
   .record-amount.expense { color: var(--red); }
   .record-amount.income { color: var(--green); }
+  .record-amount.neutral { color: var(--text3); }
 
   .record-time {
     font-family: 'DM Mono', monospace;
@@ -1323,7 +1324,11 @@ async function refresh() {
   const records = await loadRecords(currentYear, currentMonth);
 
   let expense = 0, income = 0;
-  records.forEach(r => { r.type === 'expense' ? expense += r.amount : income += r.amount; });
+  records.forEach(r => {
+    if (r.type === 'expense') expense += r.amount;
+    else if (r.type === 'income') income += r.amount;
+    // neutral 不计入收支统计
+  });
   document.getElementById('totalExpense').textContent = '¥' + expense.toFixed(0);
   document.getElementById('totalIncome').textContent  = '¥' + income.toFixed(0);
   const bal = income - expense;
@@ -1376,8 +1381,8 @@ function renderRecords(records) {
               ${r.note ? `<div class="record-note">${r.note}</div>` : ''}
             </div>
             <div class="record-right">
-              <div class="record-amount ${r.type}">${r.type==='expense'?'-':'+'}¥${r.amount.toFixed(2)}</div>
-              <div class="record-time">${r.time}</div>
+              <div class="record-amount ${r.type}">${r.type==='expense'?'-':r.type==='income'?'+':''} ¥${r.amount.toFixed(2)}</div>
+              <div class="record-time">${r.time}${r.type==='neutral'?' · 不计收支':''}</div>
             </div>
             <button class="delete-btn" onclick="deleteRecord(${r.id})" title="删除">🗑</button>
           </div>
@@ -1554,16 +1559,14 @@ function parseXLSXFile(file) {
         const inOut  = String(row[iInOut] || '').trim();
         const status = String(row[iStatus] || '').trim();
 
-        // 跳过中性交易、退款、失败
-        if (!inOut || inOut === '/' || inOut === '中性交易') continue;
+        // 只跳过已退款、失败
         if (status.includes('已退款') || status.includes('失败')) continue;
+        if (!inOut || inOut === '/') continue;
 
-        // 金额：可能是数字或"¥87.00"字符串
         const rawAmt = row[iAmount];
         const amount = parseFloat(String(rawAmt).replace(/[¥￥,]/g, ''));
         if (!amount || isNaN(amount) || amount <= 0) continue;
 
-        // 时间：cellDates=true 时是 Date 对象
         let date, time;
         const tv = row[iTime];
         if (tv instanceof Date) {
@@ -1577,11 +1580,15 @@ function parseXLSXFile(file) {
         const name  = String(row[iName]  || '').trim();
         const goods = String(row[iGoods] || '').trim();
         const noteRaw = [name, goods].filter(s => s && s !== '/').join(' ').trim().slice(0, 30);
-        const isIncome = inOut.includes('收入') || inOut === '收';
+
+        // 中性交易（充值/提现等）记为 neutral
+        const isNeutral = inOut === '中性交易' || inOut.includes('不计');
+        const isIncome  = !isNeutral && (inOut.includes('收入') || inOut === '收');
+        const type = isNeutral ? 'neutral' : (isIncome ? 'income' : 'expense');
 
         records.push({
           id: genId(),
-          type: isIncome ? 'income' : 'expense',
+          type,
           amount, date, time,
           cat: guessCat(noteRaw),
           note: noteRaw,
@@ -1666,9 +1673,8 @@ function parseAlipay(text) {
     const typeStr  = idxType   >= 0 ? cols[idxType].trim()   : '';
     const status   = idxStatus >= 0 ? cols[idxStatus].trim() : '';
 
-    // 跳过不计收支、失败、关闭
-    if (typeStr === '不计收支' || typeStr.includes('不计')) continue;
-    if (status.includes('失败') || status.includes('已关闭') || status.includes('关闭')) continue;
+    // 只跳过真正失败/关闭的交易
+    if (status.includes('失败') || status.includes('已关闭') || status.includes('交易关闭')) continue;
 
     const amountStr = idxAmount >= 0 ? cols[idxAmount].replace(/[,，]/g, '') : '0';
     const amount = parseFloat(amountStr);
@@ -1678,13 +1684,17 @@ function parseAlipay(text) {
     const { date, time } = parseDateTime(timeStr);
     const name   = idxName >= 0 ? cols[idxName].trim()  : '';
     const desc   = idxDesc >= 0 ? cols[idxDesc].trim()  : '';
-    const isIncome = typeStr.includes('收入') || typeStr === '收';
+
+    // 判断收支类型：不计收支记为 neutral
+    const isNeutral = typeStr === '不计收支' || typeStr.includes('不计');
+    const isIncome  = !isNeutral && (typeStr.includes('收入') || typeStr === '收');
+    const type = isNeutral ? 'neutral' : (isIncome ? 'income' : 'expense');
 
     const noteRaw = [name, desc].filter(s => s && s !== '/').join(' ').trim().slice(0, 30);
 
     records.push({
       id: genId(),
-      type: isIncome ? 'income' : 'expense',
+      type,
       amount, date, time,
       cat: guessCat(noteRaw),
       note: noteRaw,
