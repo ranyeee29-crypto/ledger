@@ -931,7 +931,11 @@
       <button class="export-btn" onclick="copyText()">📋 复制账单文本</button>
     </div>
     <div class="export-card">
-      <div class="export-title">数据管理</div>
+      <div class="export-title">同步到飞书多维表格</div>
+      <div class="export-desc">将当月账单一键同步到飞书，也可全量同步所有历史数据</div>
+      <button class="export-btn" onclick="fsSyncMonth()">☁️ 同步当月到飞书</button>
+      <button class="export-btn" onclick="fsSyncAll()">☁️ 全量同步所有数据到飞书</button>
+    </div>
       <div class="export-desc">清除当月所有记录（不可恢复）</div>
       <button class="export-btn" onclick="clearMonth()" style="color:var(--red)">🗑 清除当月记录</button>
     </div>
@@ -1058,7 +1062,131 @@ const sb = {
   }
 };
 
-// ── 缓存层（减少请求次数）──
+// ── 飞书多维表格配置 ──────────────────────────────────
+const FS = {
+  APP_ID:     'cli_a9354c8e64389bb3',
+  APP_SECRET: 'GNSBdtHMrtdw1CY2f0haveYcdI6fw5ex',
+  APP_TOKEN:  'G600b69DxaP1OishUg0cqwKcnrg',
+  TABLE_ID:   'tblWFJRPV514ITBf',
+  BASE_URL:   'https://open.feishu.cn/open-apis',
+};
+
+let _fsToken = null;
+let _fsTokenExp = 0;
+
+// 获取 tenant_access_token（有效期 2 小时，自动缓存）
+async function fsGetToken() {
+  if (_fsToken && Date.now() < _fsTokenExp) return _fsToken;
+  try {
+    const res = await fetch(`${FS.BASE_URL}/auth/v3/tenant_access_token/internal`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ app_id: FS.APP_ID, app_secret: FS.APP_SECRET })
+    });
+    const data = await res.json();
+    if (data.code !== 0) { console.error('飞书 token 失败', data); return null; }
+    _fsToken = data.tenant_access_token;
+    _fsTokenExp = Date.now() + (data.expire - 60) * 1000;
+    return _fsToken;
+  } catch (e) { console.error('飞书 token 异常', e); return null; }
+}
+
+// 确保多维表格字段存在，首次使用时自动创建
+const FS_FIELDS = {
+  '日期': 'DateTime',   // 日期时间
+  '类型': 'Text',
+  '分类': 'Text',
+  '金额': 'Number',
+  '备注': 'Text',
+  '来源': 'Text',
+  '月份': 'Text',
+};
+
+async function fsEnsureFields() {
+  const token = await fsGetToken();
+  if (!token) return false;
+  // 获取现有字段
+  const res = await fetch(
+    `${FS.BASE_URL}/bitable/v1/apps/${FS.APP_TOKEN}/tables/${FS.TABLE_ID}/fields`,
+    { headers: { 'Authorization': `Bearer ${token}` } }
+  );
+  const data = await res.json();
+  if (data.code !== 0) return false;
+  const existing = new Set((data.data?.items || []).map(f => f.field_name));
+
+  // 创建缺少的字段
+  for (const [name, type] of Object.entries(FS_FIELDS)) {
+    if (existing.has(name)) continue;
+    const typeMap = { 'Text': 1, 'Number': 2, 'DateTime': 5 };
+    await fetch(
+      `${FS.BASE_URL}/bitable/v1/apps/${FS.APP_TOKEN}/tables/${FS.TABLE_ID}/fields`,
+      {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ field_name: name, type: typeMap[type] || 1 })
+      }
+    );
+  }
+  return true;
+}
+
+let _fsFieldsReady = false;
+
+// 把记录数组同步到飞书多维表格
+async function fsSyncRecords(records) {
+  const token = await fsGetToken();
+  if (!token) { console.warn('飞书 token 获取失败，跳过同步'); return false; }
+
+  // 首次同步时确保字段存在
+  if (!_fsFieldsReady) {
+    await fsEnsureFields();
+    _fsFieldsReady = true;
+  }
+
+  const CAT_LABELS = {
+    food:'餐饮', transport:'交通', shop:'购物', home:'居家',
+    entertainment:'娱乐', health:'健康', education:'学习', other:'其他',
+    salary:'工资', freelance:'兼职', invest:'投资', gift:'红包', other_in:'其他收入'
+  };
+
+  // 分批写入，每批 500 条（飞书单次上限）
+  const BATCH = 500;
+  for (let i = 0; i < records.length; i += BATCH) {
+    const batch = records.slice(i, i + BATCH);
+    const rows = batch.map(r => ({
+      fields: {
+        '日期': `${r.date} ${r.time}`,
+        '类型': r.type === 'expense' ? '支出' : '收入',
+        '分类': CAT_LABELS[r.cat] || r.cat,
+        '金额': r.amount,
+        '备注': r.note || '',
+        '来源': r.source || 'manual',
+        '月份': r.date.slice(0, 7),
+      }
+    }));
+
+    const res = await fetch(
+      `${FS.BASE_URL}/bitable/v1/apps/${FS.APP_TOKEN}/tables/${FS.TABLE_ID}/records/batch_create`,
+      {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ records: rows })
+      }
+    );
+    const data = await res.json();
+    if (data.code !== 0) {
+      console.error('飞书写入失败', data);
+      return false;
+    }
+  }
+  return true;
+}
+
+// 单条记录同步到飞书（手动记账时调用）
+async function fsSyncOne(record) {
+  return fsSyncRecords([record]);
+}
+
 const cache = {};
 
 async function loadRecords(y, m) {
@@ -1159,6 +1287,9 @@ async function addRecord() {
   document.getElementById('noteInput').value = '';
   if (ok) {
     showToast('✅ 已记录 ¥' + amount.toFixed(2));
+    fsSyncOne(record).then(fsOk => {
+      if (!fsOk) showToast('⚠️ 飞书同步失败，数据已本地保存');
+    });
     if (currentYear === now.getFullYear() && currentMonth === now.getMonth()+1) await refresh();
   } else {
     showToast('❌ 保存失败，请检查网络');
@@ -1201,7 +1332,7 @@ async function refresh() {
   balEl.style.color = bal >= 0 ? 'var(--green)' : 'var(--red)';
 
   renderRecords(records);
-  renderCharts(records);
+  await renderCharts(records);
 }
 
 function renderRecords(records) {
@@ -1256,8 +1387,10 @@ function renderRecords(records) {
   }).join('');
 }
 
-function renderCharts(records) {
-  // Category pie
+async function renderCharts(records) {
+  if (!Array.isArray(records)) records = await loadRecords(currentYear, currentMonth);
+
+  // 分类支出图
   const catTotals = {};
   records.filter(r=>r.type==='expense').forEach(r => {
     catTotals[r.cat] = (catTotals[r.cat] || 0) + r.amount;
@@ -1277,12 +1410,12 @@ function renderCharts(records) {
       }).join('')
     : '<div style="color:var(--text3);font-size:13px;text-align:center;padding:20px">本月暂无支出记录</div>';
 
-  // Trend
+  // 近6个月趋势
   const months = [];
   for (let i = 5; i >= 0; i--) {
     let y = currentYear, m = currentMonth - i;
     while (m < 1) { m += 12; y--; }
-    const recs = loadRecords(y, m);
+    const recs = await loadRecords(y, m);
     const total = recs.filter(r=>r.type==='expense').reduce((s,r)=>s+r.amount,0);
     months.push({ label: String(m).padStart(2,'0'), total, isCurrent: (i===0) });
   }
@@ -1334,7 +1467,28 @@ async function copyText() {
   navigator.clipboard.writeText(lines.join('\n')).then(() => showToast('已复制到剪贴板'));
 }
 
-function showToast(msg) {
+// 同步当月到飞书
+async function fsSyncMonth() {
+  showToast('读取当月数据…');
+  const records = await loadRecords(currentYear, currentMonth);
+  if (!records.length) { showToast('当月暂无记录'); return; }
+  showToast(`同步 ${records.length} 条到飞书…`);
+  const ok = await fsSyncRecords(records);
+  showToast(ok ? `☁️ 当月 ${records.length} 条已同步到飞书` : '❌ 飞书同步失败，请检查应用权限');
+}
+
+// 全量同步所有数据到飞书
+async function fsSyncAll() {
+  if (!confirm('将把所有历史账单同步到飞书，可能需要较长时间，确定继续？')) return;
+  showToast('读取所有数据…');
+  const records = await getAllRecords();
+  if (!records.length) { showToast('暂无数据'); return; }
+  showToast(`同步 ${records.length} 条到飞书…`);
+  const ok = await fsSyncRecords(records);
+  showToast(ok ? `☁️ 全部 ${records.length} 条已同步到飞书` : '❌ 飞书同步失败，请检查应用权限');
+}
+
+
   const el = document.getElementById('toast');
   el.textContent = msg;
   el.classList.add('show');
@@ -1668,8 +1822,14 @@ async function confirmImport() {
   const toImport = pendingImport.filter(r => !r.isDuplicate);
   if (!toImport.length) { showToast('没有新记录可导入'); return; }
 
-  // 用 genId() 确保每条记录 ID 唯一
-  const clean = toImport.map(r => ({ ...r, id: genId() }));
+  // 清理临时字段，只保留数据库字段
+  const KEEP = ['id','type','amount','cat','note','date','time','ts','source'];
+  const clean = toImport.map(r => {
+    const obj = {};
+    KEEP.forEach(k => { if (r[k] !== undefined) obj[k] = r[k]; });
+    obj.id = genId();
+    return obj;
+  });
 
   showToast(`导入中，共 ${clean.length} 条…`);
   // 分批 upsert，每批 50 条避免请求过大
@@ -1689,10 +1849,15 @@ async function confirmImport() {
   }
 
   Object.keys(cache).forEach(k => delete cache[k]);
-  showToast(`✅ 成功导入 ${done} 条记录`);
+  showToast(`✅ 成功导入 ${done} 条，同步飞书中…`);
   pendingImport = [];
   document.getElementById('importPreview').style.display = 'none';
   await refresh();
+
+  // 异步同步到飞书，不阻塞主流程
+  fsSyncRecords(clean).then(fsOk => {
+    showToast(fsOk ? `☁️ 已同步 ${done} 条到飞书多维表格` : '⚠️ 飞书同步失败，数据已存入 Supabase');
+  });
 }
 
 async function clearMonth() {
