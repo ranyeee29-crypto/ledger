@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>记账本</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
   :root {
@@ -852,8 +853,8 @@
     <div class="drop-zone" id="dropZone" onclick="document.getElementById('csvFileInput').click()">
       <div class="drop-icon">📂</div>
       <div class="drop-title">点击选择 CSV 文件</div>
-      <div class="drop-sub">支持支付宝 · 微信支付 · 本账本导出格式</div>
-      <input type="file" id="csvFileInput" accept=".csv" style="display:none" onchange="handleFileSelect(event)">
+      <div class="drop-sub">支持支付宝 CSV · 微信支付 XLSX · 本账本导出格式</div>
+      <input type="file" id="csvFileInput" accept=".csv,.xlsx" style="display:none" onchange="handleFileSelect(event)">
     </div>
 
     <!-- Format Tips -->
@@ -1257,82 +1258,180 @@ document.addEventListener('DOMContentLoaded', () => {
 
 function handleFileSelect(e) {
   const file = e.target.files[0];
-  if (file) parseCSVFile(file);
+  if (!file) return;
   e.target.value = '';
+  if (file.name.endsWith('.xlsx') || file.name.endsWith('.xls')) {
+    parseXLSXFile(file);
+  } else {
+    parseCSVFile(file);
+  }
+}
+
+function parseXLSXFile(file) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const wb = XLSX.read(e.target.result, { type: 'array', cellDates: true });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+
+      // 找表头行：含"交易时间"的行
+      const headerIdx = rows.findIndex(r => r.some(c => String(c).includes('交易时间')));
+      if (headerIdx === -1) { showToast('未找到账单数据，请检查文件'); return; }
+
+      const headers = rows[headerIdx].map(h => String(h).trim());
+      const iTime   = headers.findIndex(h => h.includes('交易时间'));
+      const iType   = headers.findIndex(h => h === '交易类型');
+      const iName   = headers.findIndex(h => h.includes('交易对方'));
+      const iGoods  = headers.findIndex(h => h.includes('商品'));
+      const iInOut  = headers.findIndex(h => h.includes('收/支'));
+      const iAmount = headers.findIndex(h => h.includes('金额'));
+      const iStatus = headers.findIndex(h => h.includes('当前状态'));
+
+      const records = [];
+      for (let i = headerIdx + 1; i < rows.length; i++) {
+        const row = rows[i];
+        if (!row || !row[iTime]) continue;
+
+        const inOut  = String(row[iInOut] || '').trim();
+        const status = String(row[iStatus] || '').trim();
+
+        // 跳过中性交易、退款、失败
+        if (!inOut || inOut === '/' || inOut === '中性交易') continue;
+        if (status.includes('已退款') || status.includes('失败')) continue;
+
+        // 金额：可能是数字或"¥87.00"字符串
+        const rawAmt = row[iAmount];
+        const amount = parseFloat(String(rawAmt).replace(/[¥￥,]/g, ''));
+        if (!amount || isNaN(amount) || amount <= 0) continue;
+
+        // 时间：cellDates=true 时是 Date 对象
+        let date, time;
+        const tv = row[iTime];
+        if (tv instanceof Date) {
+          date = `${tv.getFullYear()}-${String(tv.getMonth()+1).padStart(2,'0')}-${String(tv.getDate()).padStart(2,'0')}`;
+          time = `${String(tv.getHours()).padStart(2,'0')}:${String(tv.getMinutes()).padStart(2,'0')}`;
+        } else {
+          const parsed = parseDateTime(String(tv));
+          date = parsed.date; time = parsed.time;
+        }
+
+        const name  = String(row[iName]  || '').trim();
+        const goods = String(row[iGoods] || '').trim();
+        const noteRaw = [name, goods].filter(s => s && s !== '/').join(' ').trim().slice(0, 30);
+        const isIncome = inOut.includes('收入') || inOut === '收';
+
+        records.push({
+          id: Date.now() + Math.random(),
+          type: isIncome ? 'income' : 'expense',
+          amount, date, time,
+          cat: guessCat(noteRaw),
+          note: noteRaw,
+          source: 'wechat',
+          ts: new Date(date + 'T' + time).getTime() || Date.now()
+        });
+      }
+
+      if (!records.length) { showToast('未解析到有效记录'); return; }
+      pendingImport = records;
+      showImportPreview(records, 'wechat');
+    } catch (err) {
+      showToast('文件读取失败：' + err.message);
+    }
+  };
+  reader.readAsArrayBuffer(file);
 }
 
 function parseCSVFile(file) {
-  const reader = new FileReader();
-  reader.onload = e => {
-    let text = e.target.result;
-    // 处理 BOM
+  const tryDecode = (text) => {
     if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
     const format = detectFormat(text);
+    if (!format) return null;
     let records = [];
     if (format === 'alipay') records = parseAlipay(text);
     else if (format === 'wechat') records = parseWechat(text);
     else if (format === 'ledger') records = parseLedger(text);
-    else { showToast('格式无法识别，请检查文件'); return; }
-
-    if (!records.length) { showToast('未解析到有效记录'); return; }
-    pendingImport = records;
-    showImportPreview(records, format);
+    return records.length ? { records, format } : null;
   };
-  reader.readAsText(file, 'UTF-8');
+  // 先用 GBK 读（支付宝官方导出是 GBK 编码）
+  const r1 = new FileReader();
+  r1.onload = e => {
+    const res = tryDecode(e.target.result);
+    if (res) { pendingImport = res.records; showImportPreview(res.records, res.format); return; }
+    // GBK 失败，回退 UTF-8
+    const r2 = new FileReader();
+    r2.onload = e2 => {
+      const res2 = tryDecode(e2.target.result);
+      if (res2) { pendingImport = res2.records; showImportPreview(res2.records, res2.format); }
+      else showToast('格式无法识别，请检查文件');
+    };
+    r2.readAsText(file, 'UTF-8');
+  };
+  r1.readAsText(file, 'GBK');
 }
 
 function detectFormat(text) {
-  if (text.includes('支付宝') && (text.includes('交易号') || text.includes('商家订单号'))) return 'alipay';
+  // 支付宝：有"支付宝"字样 + 交易分类 或 收/支 列
+  if (text.includes('支付宝') && (text.includes('交易分类') || text.includes('交易时间'))) return 'alipay';
+  if (text.includes('交易号') || text.includes('商家订单号')) return 'alipay';
+  // 微信
   if (text.includes('微信支付') || (text.includes('交易类型') && text.includes('支付方式'))) return 'wechat';
-  if (text.includes('日期,时间,类型,分类,金额')) return 'ledger';
-  // 宽松匹配
-  if (text.includes('收/支') || text.includes('交易分类')) return 'alipay';
   if (text.includes('收/支') && text.includes('当前状态')) return 'wechat';
+  // 本账本
+  if (text.includes('日期,时间,类型,分类,金额')) return 'ledger';
+  // 宽松兜底
+  if (text.includes('收/支') && text.includes('交易状态')) return 'alipay';
   return null;
 }
 
 // 支付宝 CSV 解析
 function parseAlipay(text) {
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-  // 找表头行
-  let headerIdx = lines.findIndex(l => l.includes('交易时间') || l.includes('交易创建时间'));
+  // 找表头行（包含"交易时间"或"收/支"的行）
+  let headerIdx = lines.findIndex(l => l.includes('交易时间'));
   if (headerIdx === -1) headerIdx = lines.findIndex(l => l.includes('收/支'));
   if (headerIdx === -1) return [];
 
   const headers = splitCSVLine(lines[headerIdx]);
   const idxTime   = findColIdx(headers, ['交易时间', '交易创建时间']);
   const idxName   = findColIdx(headers, ['交易对方', '商品名称', '对方账户']);
-  const idxAmount = findColIdx(headers, ['金额（元）', '金额']);
+  const idxDesc   = findColIdx(headers, ['商品说明', '备注']);
+  const idxAmount = findColIdx(headers, ['金额', '金额（元）']);
   const idxType   = findColIdx(headers, ['收/支', '收入/支出']);
   const idxStatus = findColIdx(headers, ['交易状态', '资金状态']);
-  const idxRemark = findColIdx(headers, ['备注', '商品说明']);
 
   const records = [];
   for (let i = headerIdx + 1; i < lines.length; i++) {
     const cols = splitCSVLine(lines[i]);
     if (cols.length < 3) continue;
-    const typeStr = idxType >= 0 ? cols[idxType] : '';
-    const status  = idxStatus >= 0 ? cols[idxStatus] : '';
-    // 跳过不计收支、退款等
-    if (typeStr.includes('不计') || status.includes('失败') || status.includes('关闭')) continue;
 
-    const amountStr = idxAmount >= 0 ? cols[idxAmount].replace(/,/g, '') : '0';
+    const typeStr  = idxType   >= 0 ? cols[idxType].trim()   : '';
+    const status   = idxStatus >= 0 ? cols[idxStatus].trim() : '';
+
+    // 跳过不计收支、失败、关闭
+    if (typeStr === '不计收支' || typeStr.includes('不计')) continue;
+    if (status.includes('失败') || status.includes('已关闭') || status.includes('关闭')) continue;
+
+    const amountStr = idxAmount >= 0 ? cols[idxAmount].replace(/[,，]/g, '') : '0';
     const amount = parseFloat(amountStr);
-    if (!amount || isNaN(amount)) continue;
+    if (!amount || isNaN(amount) || amount <= 0) continue;
 
     const timeStr = idxTime >= 0 ? cols[idxTime].trim() : '';
     const { date, time } = parseDateTime(timeStr);
-    const name = idxName >= 0 ? cols[idxName].trim() : '';
-    const remark = idxRemark >= 0 ? cols[idxRemark].trim() : '';
+    const name   = idxName >= 0 ? cols[idxName].trim()  : '';
+    const desc   = idxDesc >= 0 ? cols[idxDesc].trim()  : '';
     const isIncome = typeStr.includes('收入') || typeStr === '收';
+
+    const noteRaw = [name, desc].filter(s => s && s !== '/').join(' ').trim().slice(0, 30);
 
     records.push({
       id: Date.now() + Math.random(),
       type: isIncome ? 'income' : 'expense',
       amount, date, time,
-      cat: guessCat(name + ' ' + remark),
-      note: (name + (remark && remark !== '/' ? ' ' + remark : '')).trim().slice(0, 30),
-      source: 'alipay', ts: new Date(date + ' ' + time).getTime() || Date.now()
+      cat: guessCat(noteRaw),
+      note: noteRaw,
+      source: 'alipay',
+      ts: new Date(date + 'T' + time).getTime() || Date.now()
     });
   }
   return records;
