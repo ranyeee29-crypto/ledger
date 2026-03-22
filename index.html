@@ -1488,7 +1488,7 @@ async function fsSyncAll() {
   showToast(ok ? `☁️ 全部 ${records.length} 条已同步到飞书` : '❌ 飞书同步失败，请检查应用权限');
 }
 
-
+function showToast(msg) {
   const el = document.getElementById('toast');
   el.textContent = msg;
   el.classList.add('show');
