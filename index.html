@@ -73,27 +73,6 @@
       flex: none;
     }
 
-    /* PC主内容区：左右双栏 */
-    .pc-layout {
-      display: grid;
-      grid-template-columns: 320px 1fr;
-      gap: 0;
-      height: calc(100vh - 130px);
-    }
-
-    /* 左栏：记账 + 导入 */
-    .pc-left {
-      border-right: 1px solid var(--border);
-      overflow-y: auto;
-      padding: 20px;
-    }
-
-    /* 右栏：明细 + 统计 */
-    .pc-right {
-      overflow-y: auto;
-      padding: 20px 24px;
-    }
-
     /* 隐藏移动端底部导航 */
     .bottom-nav { display: none; }
 
@@ -120,8 +99,36 @@
     }
     .export-card { margin-bottom: 0; }
 
-    /* panel在PC上都显示（由JS控制左右栏） */
-    .panel { display: block !important; }
+    /* PC端panel默认隐藏，由JS控制显示 */
+    .panel { display: none; }
+
+    /* 左栏宽度自适应，内容不截断 */
+    .pc-layout {
+      display: grid;
+      grid-template-columns: 300px 1fr;
+      gap: 0;
+      min-height: calc(100vh - 140px);
+    }
+
+    .pc-left {
+      border-right: 1px solid var(--border);
+      overflow-y: auto;
+      padding: 16px;
+      min-width: 0;
+    }
+
+    .pc-right {
+      overflow-y: auto;
+      padding: 20px 28px;
+      min-width: 0;
+    }
+
+    /* 左栏记账组件宽度撑满 */
+    .pc-left .quick-entry { width: 100%; }
+    .pc-left .amount-input { font-size: 24px; }
+    .pc-left .entry-bottom { flex-wrap: wrap; gap: 8px; }
+    .pc-left .add-btn { width: 100%; padding: 10px; }
+    .pc-left .note-input { width: 100%; }
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
